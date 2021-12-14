@@ -1,0 +1,887 @@
+// Import MODIS LST and with coarser resolution, 1km, copmare the whole of Colorado and Moffat county
+
+// var sw_white_bg = true; 
+
+// get the State boundary of Colorado
+var State_Bnds_CO = State_Bnds.filter(ee.Filter.eq('GEOID', '08')); //CO:'08'; UT:'49'
+// var State_Bnds_CO_geo = State_Bnds_CO.first().geometry();
+// print(State_Bnds_CO);
+
+// create county boundary variable
+
+// ****Change GEOID here and in calculate_daily_c_mean_std fn ****
+
+// Change countyName
+
+// var county_list = ['Denver', 'Gilpin', 'Elbert', 'Moffat', 'Phillips', 'San_Juan'];
+// var countyName = county_list[3];
+
+// County GEOID county_dict = {'08031': 'Denver', 08039': 'Elbert', '08047': 'Gilpin', 
+//                            '08081': 'Moffat', '08095': 'Phillips', '08111': 'San_Juan'}
+// var TgtCounty_Bnds = Counties.filter(ee.Filter.eq('GEOID', '08081'));
+// Map.addLayer(TgtCounty_Bnds);
+
+// date parameters
+var Date_st_str = '2003-04-10'; //'2000-08-07';
+
+
+var Date_st = ee.Date(Date_st_str);
+var Date_ed = Date_st.advance(1, 'day');
+
+ 
+
+// Landsat SR mask
+function maskl5SR(image) {
+  var fillBitMask = 1;
+  var clearBitMask = 1 << 1;
+  var cloudBitMask = 1 << 5;
+
+  var pixelqa1 = image.select('pixel_qa');
+
+
+  var mask1 = pixelqa1.bitwiseAnd(fillBitMask).eq(0)
+    .and(pixelqa1.bitwiseAnd(clearBitMask).neq(0))
+    .and(pixelqa1.bitwiseAnd(cloudBitMask).eq(0))
+    //.and(pixelqa.bitwiseAnd(cloudConfBit7Mask).eq(0))
+    //.and(pixelqa.bitwiseAnd(cirrusConfBit9Mask).eq(0))
+    ;
+
+  // Return the masked image (excluding the PIXELQA and STQA layers)
+  return image.updateMask(mask1)
+    .select(['B3', 'B4'])// [lst_name, pixelqa_name, lstqa_name]
+    .addBands(mask1.rename('mask_ndvi'))
+    ;
+
+}
+
+var landsat_SR_Img = ee.Image(Landsat_Surface_Reflectance
+  .filterBounds(State_Bnds_CO)
+  .filterDate(Date_st.format('yyyy-MM-dd'), Date_ed.format('yyyy-MM-dd'))
+  .map(maskl5SR)
+  .mosaic())
+  .clipToCollection(State_Bnds_CO)
+  .reproject('EPSG:3857', null, 30)
+  ;
+// print(landsat_SR_Img);
+
+// Function to cloud mask from the pixel_qa band of Landsat 5 ARD LST data.
+function maskARDL5lst(image) {
+  var fillBitMask = 1;
+  var clearBitMask = 1 << 1;
+  var cloudBitMask = 1 << 5;
+  //var cloudConfBit6Mask = 1 << 6;
+  //var cloudConfBit7Mask = 1 << 7;
+  //var cirrusConfBit8Mask = 1 << 8;
+  //var cirrusConfBit9Mask = 1 << 9;
+
+  var lst_name = 'b1';
+  var pixelqa_name = 'b2';
+  var lstqa_name = 'b3';
+  var lstqa_scale_name = 'STQA_scale_factor';
+
+  var lstqa_threshold = 5.0;
+
+  // get the pixel QA band
+  // pixelqa_name: 'b2'
+  var pixelqa = image.select(pixelqa_name);
+
+  // get the STQA band
+  var lstqa = image.select(lstqa_name);
+  var stqa_scale = ee.Number(image.get(lstqa_scale_name));
+
+  var mask = pixelqa.bitwiseAnd(fillBitMask).eq(0)
+    .and(pixelqa.bitwiseAnd(clearBitMask).neq(0))
+    .and(pixelqa.bitwiseAnd(cloudBitMask).eq(0))
+    //.and(pixelqa.bitwiseAnd(cloudConfBit7Mask).eq(0))
+    //.and(pixelqa.bitwiseAnd(cirrusConfBit9Mask).eq(0))
+    .and(lstqa.multiply(stqa_scale).lt(lstqa_threshold))
+    ;
+
+  // Return the masked image (excluding the PIXELQA and STQA layers)
+  return image.updateMask(mask)
+    .select(lst_name)  // [lst_name, pixelqa_name, lstqa_name]
+    .addBands(mask.rename('mask'))
+    ;
+
+}
+
+// National Land Cover Dataset mask for cropland/grassland/forests
+//  -----MODIS Landcover dataset----
+function nlcd_mask(image) {
+  var gl_val = 71;
+  var open_shrub = 6;
+  var closed_shrub = 7;
+  var crop_val = 82;
+  var forests_val = 5;
+  
+  var lc_band = image.select('landcover');
+
+  var lc_mask = lc_band.eq(crop_val)
+    // .or(lc_band.eq(crop_val))
+    // .or(lc_band.eq(open_shrub))
+    // .or(lc_band.eq(closed_shrub))
+    // .or(lc_band.eq(gl_val))
+    // .or(lc_band.eq(crop_natVeg_val));
+  ;
+  return image.updateMask(lc_mask);
+}
+
+function calculate_daily_c_mean_std(in_Date_st_str) {
+
+  in_Date_st_str = ee.Date(in_Date_st_str);
+
+  //var sw_white_bg = true; //true;
+
+  // get the State boundary of Colorado
+  var State_Bnds_CO = State_Bnds.filter(ee.Filter.eq('GEOID', '08')); //CO:'08'; UT:'49'
+  // var State_Bnds_CO_geo = State_Bnds_CO.first().geometry();
+  //print(State_Bnds_CO);
+  // var TgtCounty_Bnds = Counties.filter(ee.Filter.eq('GEOID', '08081'));
+
+  var Date_st = ee.Date(in_Date_st_str);
+  var Date_ed = Date_st.advance(1, 'day');
+  // Get a land surface temperature image from the Landsat 8 ARD LST collection.
+  // var ARD5_Img = ee.Image(
+  //   ARD_LST_test
+  //     .filterBounds(TgtCounty_Bnds)
+  //     .filterDate(Date_st)
+  //     .map(maskARDL5lst)
+  //     .mosaic()
+  // )
+  //   .clipToCollection(TgtCounty_Bnds)
+  //   ;
+  var ARD5_Img = ee.Image(ARD_LST_5
+  .filterDate(Date_st.format('yyyy-MM-dd'), Date_ed.format('yyyy-MM-dd'))
+  .map(maskARDL5lst)
+  .mosaic()
+  .clipToCollection(State_Bnds_CO)
+  // .multiply(0.1)
+  );
+  var ARD5_mask = ARD5_Img.select('mask');
+  // print("ARD5_mask", ARD5_mask);
+  // Map.addLayer(ARD5_Img, {}, 'ARD5_mask'); 
+
+  //print("ARD5_Img", ARD5_Img);
+
+
+  //fetch landsat surface reflectance at B3, B4 with mask
+  var landsat_SR_Img = ee.Image(Landsat_Surface_Reflectance
+    .filterBounds(State_Bnds_CO)
+    .filterDate(Date_st.format('yyyy-MM-dd'), Date_ed.format('yyyy-MM-dd'))
+    .map(maskl5SR)
+    .mosaic())
+    .clipToCollection(State_Bnds_CO)
+    .reproject('EPSG:3857', null, 500)
+    ;
+
+  var ndvi_mask = landsat_SR_Img.select('mask_ndvi');
+  //print("ndvi_mask", ndvi_mask)
+
+  //calculation ndvi_image using B4 and B5 SR  
+  var B3_Red = landsat_SR_Img
+    .select('B3')
+    .multiply(0.0001);
+  //print('B3_red', B3_Red);
+
+  var B4_NIR = landsat_SR_Img
+    .select('B4')
+    .multiply(0.0001);
+
+  var ndvi_image = B4_NIR.expression('(B4-B3)/(B4+B3)', {
+    'B4': B4_NIR,
+    'B3': B3_Red
+  }).rename("ndvi_image");
+  // Map.addLayer(ndvi_image);
+  
+  //var ARD8_ST = ARD8_Img.select('b1');
+  //var ARD8_PIXELQA = ARD8_Img.select('b2');
+  //var modisScale = modisLST_20180701
+  //    .projection().nominalScale();
+
+  // Use these ARD8 band(s) for displaying.
+  // var ARD8_Bands = ['b1'];
+
+
+  // Define visualization parameters for LST.
+  // blue: #0000FF; red: #FF0000
+  //var ARD_LST_Vis = {bands: ARD8_Bands, min: 2000.0, max: 3500.0,
+  // var ARD_LST_Vis = {bands: ARD8_Bands, min: 3002.0, max: 3226.0, 
+  //   palette: [
+  //     '040274', '040281', '0502a3', '0502b8', '0502ce', '0502e6',
+  //     '0602ff', '235cb1', '307ef3', '269db1', '30c8e2', '32d3ef',
+  //     '3be285', '3ff38f', '86e26f', '3ae237', 'b5e22e', 'd6e21f',
+  //     'fff705', 'ffd611', 'ffb613', 'ff8b13', 'ff6e08', 'ff500d',
+  //     'ff0000', 'de0101', 'c21301', 'a71001', '911003'
+  //   ],
+  // };
+  // var NDVI_Vis = {bands: "ndvi_image", min: 0.0, max: 1.0, 
+  //   palette: [
+  //     '040274', '040281', '0502a3', '0502b8', '0502ce', '0502e6',
+  //     '0602ff', '235cb1', '307ef3', '269db1', '30c8e2', '32d3ef',
+  //     '3be285', '3ff38f', '86e26f', '3ae237', 'b5e22e', 'd6e21f',
+  //     'fff705', 'ffd611', 'ffb613', 'ff8b13', 'ff6e08', 'ff500d',
+  //     'ff0000', 'de0101', 'c21301', 'a71001', '911003'
+  //   ],
+  // };
+
+  //var satisfied_data= ndvi_image.gte(0.8).and(ARD8_ST)
+  // reduceRegion(ee.Reducer.percentile([99]), TgtCounty_Bnds, 1000).get('NDVI');
+  var ndvi_percentile = ndvi_image.reduceRegion(ee.Reducer.percentile([99]), State_Bnds_CO, 1000).get('ndvi_image');
+  // print('NDVI 99th percentile', ndvi_percentile);
+  var ndvi_perc_image = ndvi_image.gte(ee.Image(ee.Number(ndvi_percentile)));
+  // Map.addLayer(ndvi_perc_image);
+  var satisfied_data = ndvi_perc_image.and(ARD5_mask).clipToCollection(State_Bnds_CO);
+  // print(satisfied_data, "satisfied_data");
+
+
+  // NLCD 
+  var nlcd_year = NLCD.filter(ee.Filter.eq('system:index', '2016')).first();
+  
+  var nlcd_imgcol = nlcd_year
+    // .filterBounds(State_Bnds_CO)
+    // .map(nlcd_mask)
+    .select('landcover')
+    ;
+  var nlcd_img = ee.Image(nlcd_imgcol)
+    // .mosaic())
+    .clip(State_Bnds_CO)
+    ;
+
+  var nlcd_crop = nlcd_img.eq(82);
+  // Map.addLayer(nlcd_crop, {}, 'NLCD');
+  
+  // test satisfied mask ARD LST image
+  //ARD8_Img
+  var ARD5_Img_NDVIgt0d8 = ARD5_Img.updateMask(satisfied_data);
+  // print("ARD5_Img_NDVIgt0d8", ARD5_Img_NDVIgt0d8.reduceRegion(ee.Reducer.minMax(), State_Bnds_CO, 500));
+  // Map.addLayer(ARD5_Img_NDVIgt0d8.select(0).multiply(0.1));
+
+  // var landtemperature = ARD5_Img_NDVIgt0d8.select(0).divide(10);
+  var landtemperature = ARD5_Img_NDVIgt0d8.select(0).multiply(0.1)
+    .updateMask(nlcd_crop);
+    // .ceil();
+  
+  print(landtemperature.reduceRegion(ee.Reducer.min(), State_Bnds_CO, 500), 'landtemperature');
+  // Map.addLayer(landtemperature, {}, 'landtemperature');
+  var min_lst = landtemperature.reduceRegion(ee.Reducer.min(), State_Bnds_CO, 500);
+  var min_landtemperature = min_lst.toImage().toFloat().updateMask(satisfied_data);
+  
+  // if (sw_white_bg) {
+  // var white_bg = ee.Image(1).clipToCollection(State_Bnds_CO);
+  // Map.addLayer(
+  //   white_bg, {palette: ['ffffff']},
+  //   'white background');
+  // }
+
+  //Map.addLayer(ARD8_mask, {palette: ['00ff00']}, 'ARD8_mask');
+
+  // Dispaly the ARD LST on the given day
+  //Map.centerObject(CO_center, 6);
+  // Map.addLayer(
+  //   satisfied_data, {},
+  //   'Qualified NDVI & ARD LST (combined mask)');
+
+  // Map.addLayer(
+  //   ARD8_mask, {},
+  //   'Qualified ARD LST (mask)');
+
+  // Map.addLayer(
+  //   ndvi_image, NDVI_Vis,
+  //   'ndvi_image');
+
+  // Map.addLayer(
+  //   ARD8_Img_NDVIgt0d8, {},
+  //   'ARD8_Img_NDVIgt0d8'
+  //   );
+
+  // Map.addLayer(
+  //   ARD8_Img, {},
+  //   'ARD8_Img'
+  //   );
+
+
+  // process DaymetV4 dataset
+  var dataset = ee.ImageCollection("NASA/ORNL/DAYMET_V4")
+    .filter(ee.Filter.date(Date_st))
+    .mosaic();
+  var maximumTemperature = dataset.select('tmax')
+    .clipToCollection(State_Bnds_CO)
+    .updateMask(nlcd_crop);
+  maximumTemperature = maximumTemperature.updateMask(nlcd_crop);
+  // var maximumTemperatureVis = {
+  //   min: 15.0,
+  //   max: 35.0,
+  //   palette: ['1621A2', 'white', 'cyan', 'green', 'yellow', 'orange', 'red'],
+  // };
+
+
+  // Map.addLayer(maximumTemperature, maximumTemperatureVis, 'Maximum Temperature');
+
+  var maxkelvin = maximumTemperature.add(273.15);
+
+  // var maxkelvinVis = {
+  //   min: 288.15,
+  //   max: 308.15,
+  //   palette: ['1621A2', 'white', 'cyan', 'green', 'yellow', 'orange', 'red'],
+  // };
+
+  // Map.addLayer(maxkelvin, maxkelvinVis, 'maxkelvin');
+
+
+  //.reproject('EPSG:4326', null, 30)
+
+  var reprojectTair = maxkelvin
+    .reproject('EPSG:4326', null, 500)
+    .updateMask(satisfied_data);
+  var max_reprojectTair =  reprojectTair.reduceRegion(ee.Reducer.max(), State_Bnds_CO, 500);
+  print(max_reprojectTair);
+  var max_Tair = max_reprojectTair.toImage().toFloat();
+  
+
+  // print('reprojectTair', reprojectTair.reduceRegion(ee.Reducer.mean(), State_Bnds_CO, 500, null, null, false, 1e7, 2));
+  // Map.addLayer(reprojectTair, maxkelvinVis, 'reprojectTair');
+
+  var c = min_landtemperature.divide(max_Tair);
+  // var cVis = {
+  //   min: 0.95,
+  //   max: 1.01,
+  //   palette: ['1621A2', 'white', 'cyan', 'green', 'yellow', 'orange', 'red'],
+  // };
+  // c.updateMask(nlcd_crop);
+  // Map.addLayer(c, {}, 'c');
+
+  //var reC=c.reproject('EPSG:4326', null, 1000)
+
+
+  var zones = satisfied_data.eq(1);
+  zones = zones.updateMask(zones.neq(0));
+
+
+  var satisfied_FC = zones.addBands(satisfied_data).reduceToVectors({
+    geometry: State_Bnds_CO,
+    crs: satisfied_data.projection(),
+    scale: 300,
+    geometryType: 'polygon',
+    eightConnected: true,
+    labelProperty: 'zone',
+    reducer: ee.Reducer.count(),
+    maxPixels: 1e13
+
+  });
+
+  //print('satisfied_FC', satisfied_FC)
+
+  //reduceRegions(collection, reducer, scale, crs, crsTransform, tileScale)
+
+  var c_scale_mean = c.reduceRegions(satisfied_FC, ee.Reducer.mean(), 30, null, null, 1);
+  c_scale_mean = c_scale_mean
+    .filter(ee.Filter.gt('mean', 0.5));
+  //print("c_scale_mean", c_scale_mean);
+
+  var c_scale_var = c.reduceRegions(satisfied_FC, ee.Reducer.variance(), 30, null, null, 1);
+  c_scale_var = c_scale_var
+    .filter(ee.Filter.gte('variance', 0.0));
+
+
+  // empty FC with 3 properties
+  var cMeanData = c_scale_mean.map(
+    function (inFt) {
+      inFt = ee.Feature(inFt);
+      var outFt = ee.Feature(null, {
+        'count': inFt.get('count'),
+        'mean': inFt.get('mean'),
+        'cTm': ee.Number(inFt.get('count')).multiply(ee.Number(inFt.get('mean')))
+      });
+      return outFt;
+    });
+
+  // List of count*mean and count
+  var cTm_List = ee.List(cMeanData.aggregate_array('cTm'));
+  var count_List = ee.List(cMeanData.aggregate_array('count'));
+  var cmeangroup_List = ee.List(cMeanData.aggregate_array('mean'));
+
+  //print("cTm_List", cTm_List);
+
+  // reduce_sum of the two Lists above
+  var cTm_sum = cTm_List.reduce(ee.Reducer.sum());
+  var count_sum = count_List.reduce(ee.Reducer.sum());
+
+
+
+  // weighted mean (c)
+  var c_wMean = ee.Number(cTm_sum).divide(ee.Number(count_sum));
+
+  var secondterm_var = ee.Number(
+    cmeangroup_List
+      .map(function (mu_j) { return ee.Number(mu_j).subtract(c_wMean).pow(2); })
+      .zip(count_List)
+      .map(function (tmp_list_j) {
+        tmp_list_j = ee.List(tmp_list_j);
+        return ee.Number(tmp_list_j.get(0)).multiply(tmp_list_j.get(1));
+      })
+      .reduce(ee.Reducer.sum())
+  )
+    .divide(ee.Number(count_sum).subtract(1))
+    ;
+
+  //.multiply(count_List).reduce(ee.Reducer.sum()).divide(count_sum.subtract(1))
+
+  //print("secondterm_var", secondterm_var)
+  //print("cTm_sum", cTm_sum);
+  //print("count_sum", count_sum);
+  //print("c_wMean", c_wMean);
+
+  //print(cMeanData)
+  //Create empty list that will hold dictionaries for each date
+  //var list_metrics = []; //ee.List([]);
+
+
+
+  // empty FC with 3 properties
+  var cvarData = c_scale_var.map(
+    function (inFt) {
+      inFt = ee.Feature(inFt);
+      var outFtsd = ee.Feature(null, {
+        'count': inFt.get('count'),
+        'variance': ee.Number(inFt.get('variance')),
+        'cTvar': ee.Number(inFt.get('count')).multiply(ee.Number(inFt.get('variance')))
+      });
+      return outFtsd;
+    });
+
+  // List of count*std and count
+  var cTvar_List = ee.List(cvarData.aggregate_array('cTvar'));
+  var countvar_List = ee.List(cvarData.aggregate_array('count'));
+
+  //print("cTvar_List", cTvar_List);
+
+  // reduce_sum of the two Lists above
+  var cTvar_sum = cTvar_List.reduce(ee.Reducer.sum());
+  var countvar_sum = countvar_List.reduce(ee.Reducer.sum());
+
+
+
+  // weighted std (c)
+  var c_sd = ee.Number(cTvar_sum).divide((ee.Number(countvar_sum)).subtract(1)).add(secondterm_var).sqrt();
+
+  //print("cTvar_sum", cTvar_sum);
+  //print("countvar_sum", countvar_sum);
+  //print("c_sd", c_sd);
+
+  var mean_sd_dict = ee.Dictionary({ "date": in_Date_st_str.format("yyyy-MM-dd"), "mean": c_wMean, "std": c_sd });
+  //print("mean_sd_dict", mean_sd_dict);
+
+  return mean_sd_dict;
+}
+
+var mean_sd_dict_test = calculate_daily_c_mean_std(Date_st_str);
+print(mean_sd_dict_test);
+
+// This is to test single day c parameter calculation
+// var mean_sd_dict_test = calculate_daily_c_mean_std(ee.Date(Date_st_str));
+// print("mean_sd_dict_test", mean_sd_dict_test);
+
+//Create empty list that will hold dictionaries for each date
+var list_metrics = []; //ee.List([]);
+
+// This is to test single month c parameter calculation
+var start_date_str = '2000-01-01'; //'2000-01-01';
+var end_date_str = '2000-01-31'; // '2000-01-31';
+// dates  
+var start_date = ee.Date(start_date_str);
+var end_date = ee.Date(end_date_str);
+var date_range = end_date.difference(start_date, 'day').getInfo();
+
+print("date_range", date_range);
+
+// create list of dates from start through date range
+var days = ee.List.sequence(0, date_range, 1.0);
+var date_Fts = days.map(function (d) {
+  // d: the index of the continuous sequence (i.e., days)
+
+  // cur_date: ee.Date of the day pointed by d
+  var cur_date = start_date.advance(d, 'day');
+  // filter by the cur_date
+  var cur_ImgCol = ARD_LST_5.filterDate(cur_date);
+  // reduce resolution of the ImageCollection 
+  cur_ImgCol = cur_ImgCol.map(function (inImg) {
+    // reproject in very low resolution (1920m) in order to reduce the calulation burdun.
+    return inImg.reproject('EPSG:3857', null, 500000);
+  });
+  // mosaic ImageCollection and clip to the target boundary
+  var cur_ImgMosaic = ee.Image(cur_ImgCol.mosaic()).clipToCollection(State_Bnds_CO);
+  // get the number of bands in the Image
+  var num_bands = cur_ImgMosaic.bandNames().size();
+
+
+  var cur_ImgCol2 = Landsat_Surface_Reflectance
+    .filterBounds(State_Bnds_CO)
+    .filterDate(cur_date, cur_date.advance(1, 'day'));
+  cur_ImgCol2 = cur_ImgCol2.map(function (inImg) {
+    // reproject in very low resolution (1920m) in order to reduce the calulation burdun.
+    return inImg.reproject('EPSG:3857', null, 500000);
+  });
+  var cur_ImgMosaic2 = ee.Image(cur_ImgCol2.mosaic()).clipToCollection(State_Bnds_CO);
+  var num_bands2 = cur_ImgMosaic2.bandNames().size();
+
+  // If number of bands > 0, return a normal date string, otherwise get an empty sting
+  var cur_date_str = ee.Algorithms.If(num_bands.gt(0).and(num_bands2.gt(0)), cur_date.format('YYYY-MM-dd'), '');
+
+  // var Mask_ImgMosaic = cur_ImgMosaic.mask().select(0).clipToCollection(State_Bnds_CO);
+
+  // var cur_countMaskVal = ee.Algorithms.If(num_bands.gt(0), 
+  //   //cur_ImgMosaic.mask().clipToCollection(State_Bnds_CO).select(0).updateMask(cur_ImgMosaic.mask().select(0)).rename('count').reduceRegion({
+  //   Mask_ImgMosaic.rename('count')
+  //   .reduceRegion({
+  //     reducer: ee.Reducer.count(),
+  //     geometry: State_Bnds_CO_geo, //State_Bnds_CO.first().geometry(),
+  //     scale: 500000,
+  //     maxPixels: 1e13
+  //   }).get('count'), 
+  //   0);
+
+  // create a empty Feature with two properties: date_str and date_str_len
+  var ret_date_Ft = ee.Feature(null, {
+    'date_str': cur_date_str,
+    'date_str_len': ee.String(cur_date_str).length()//, 
+    // 'count': cur_countMaskVal
+  });
+  return ret_date_Ft;
+});
+print("date_Fts", date_Fts);
+
+var valid_dates_filtered = date_Fts
+  .filter(ee.Filter.gt('date_str_len', 0));
+//print("valid_dates_Fts", valid_dates_filtered);
+
+var valid_dates_filtered_StringList = valid_dates_filtered.map(
+  function (inFt) {
+    inFt = ee.Feature(inFt);
+    return inFt.get('date_str');
+  });
+
+print('valid_dates_filtered_StringList', valid_dates_filtered_StringList);
+
+
+var c_m_sd_dict_list = valid_dates_filtered_StringList.map(calculate_daily_c_mean_std);
+print("c_m_sd_dict_list", c_m_sd_dict_list);
+
+// functions in loops
+
+function get_valid_dates(d) {
+  // d: the index of the continuous sequence (i.e., days)
+
+  // cur_date: ee.Date of the day pointed by d
+  var cur_date = MonthStart.advance(d, 'day');
+  // filter by the cur_date
+  var cur_ImgCol = ARD_LST_5.filterDate(cur_date);
+  // reduce resolution of the ImageCollection 
+  cur_ImgCol = cur_ImgCol.map(function (inImg) {
+    // reproject in very low resolution (1920m) in order to reduce the calulation burdun.
+    return inImg.reproject('EPSG:3857', null, 500000);
+  });
+  // mosaic ImageCollection and clip to the target boundary
+  var cur_ImgMosaic = ee.Image(cur_ImgCol.mosaic()).clipToCollection(State_Bnds_CO);
+  // get the number of bands in the Image
+  var num_bands = cur_ImgMosaic.bandNames().size();
+
+
+  var cur_ImgCol2 = Landsat_Surface_Reflectance
+    .filterBounds(State_Bnds_CO)
+    .filterDate(cur_date, cur_date.advance(1, 'day'));
+  cur_ImgCol2 = cur_ImgCol2.map(function (inImg) {
+    // reproject in very low resolution (1920m) in order to reduce the calulation burdun.
+    return inImg.reproject('EPSG:3857', null, 500000);
+  });
+  var cur_ImgMosaic2 = ee.Image(cur_ImgCol2.mosaic()).clipToCollection(State_Bnds_CO);
+  var num_bands2 = cur_ImgMosaic2.bandNames().size();
+
+  // If number of bands > 0, return a normal date string, otherwise get an empty sting
+  var cur_date_str = ee.Algorithms.If(num_bands.gt(0).and(num_bands2.gt(0)), cur_date.format('YYYY-MM-dd'), '');
+
+  // var Mask_ImgMosaic = cur_ImgMosaic.mask().select(0).clipToCollection(State_Bnds_CO);
+
+  // var cur_countMaskVal = ee.Algorithms.If(num_bands.gt(0), 
+  //   //cur_ImgMosaic.mask().clipToCollection(State_Bnds_CO).select(0).updateMask(cur_ImgMosaic.mask().select(0)).rename('count').reduceRegion({
+  //   Mask_ImgMosaic.rename('count')
+  //   .reduceRegion({
+  //     reducer: ee.Reducer.count(),
+  //     geometry: State_Bnds_CO_geo, //State_Bnds_CO.first().geometry(),
+  //     scale: 500000,
+  //     maxPixels: 1e13
+  //   }).get('count'), 
+  //   0);
+
+  // create a empty Feature with two properties: date_str and date_str_len
+  var ret_date_Ft = ee.Feature(null, {
+    'date_str': cur_date_str,
+    'date_str_len': ee.String(cur_date_str).length()//, 
+    // 'count': cur_countMaskVal
+  });
+  return ret_date_Ft;
+}
+
+function get_date_str_property(inFt) {
+  inFt = ee.Feature(inFt);
+  return inFt.get('date_str');
+}
+
+function convert_dict_2_ft(inDict) {
+  inDict = ee.Dictionary(inDict);
+  var NewFt = ee.Feature(null, {
+    'date': inDict.get("date"),
+    'mean': inDict.get("mean"),
+    'std': inDict.get("std")
+  });
+  return NewFt;
+}
+
+
+// loop to get features per month
+var m_c_m_sd_dict_list = ee.List([]);
+
+var GlobalStartDate= ee.Date("2006-01-01");
+var st_month_idx = 0;
+var ed_month_idx = 11;
+var num_months = ed_month_idx - st_month_idx + 1;
+
+for (var Month = st_month_idx; Month <= ed_month_idx; Month++) {
+  var MonthStart = GlobalStartDate.advance(ee.Number(Month), "month");
+  var MonthEnd = GlobalStartDate.advance(ee.Number(Month).add(1), "month").advance(ee.Number(-1), "day");
+  var date_range = MonthEnd.difference(MonthStart, 'day');
+
+  // create list of dates from start through date range
+  var days = ee.List.sequence(0, date_range, 1.0);
+  var date_Fts = days.map(get_valid_dates);
+  
+  var valid_dates_filtered = date_Fts
+    .filter(ee.Filter.gt('date_str_len', 0));
+  //print("valid_dates_Fts", valid_dates_filtered);
+  
+  var valid_dates_filtered_StringList = valid_dates_filtered.map(get_date_str_property);
+    
+  var c_m_sd_dict_list = valid_dates_filtered_StringList.map(calculate_daily_c_mean_std);
+  
+  var exportFC = ee.FeatureCollection(c_m_sd_dict_list.map(convert_dict_2_ft));
+  
+  // Export related client vars
+  var desc_str = MonthStart.format('YYYY-MM-dd').getInfo() + "_MeanStd";
+  var file_SN = MonthStart.format('YYYY-MM-dd').getInfo() + "_" + MonthEnd.format('YYYY-MM-dd').getInfo() + '_CO';
+  var folder = 'Cpara_minMax_test';
+  
+  // Export to Excel
+  var ExportToCSV = Export.table.toDrive(
+    exportFC,
+    desc_str, //start_date_str + "_MeanStd",
+    folder,
+    file_SN, //start_date_str + "_" + end_date_str,
+    "CSV"
+  );
+}
+
+
+print("----- End of Export of FC_of_metrics -----");
+
+
+// //var month_indices= ee.List.sequence(0, 59, 1.0);
+// var month_indices= ee.List.sequence(st_month_idx, ed_month_idx, 1.0);
+// var FC_of_metrics = 
+//   ee.FeatureCollection(
+//     month_indices.map(
+//     function (Month){
+//       var MonthStart = GlobalStartDate.advance(ee.Number(Month), "month");
+//       var MonthEnd = GlobalStartDate.advance(ee.Number(Month).add(1), "month").advance(ee.Number(-1), "day");
+//       var date_range = MonthEnd.difference(MonthStart, 'day');
+  
+      
+//       // create list of dates from start through date range
+//       var days = ee.List.sequence(0, date_range, 1.0);
+//       var date_Fts = days.map(function (d) {
+//         // d: the index of the continuous sequence (i.e., days)
+      
+//         // cur_date: ee.Date of the day pointed by d
+//         var cur_date = MonthStart.advance(d, 'day');
+//         // filter by the cur_date
+//         var cur_ImgCol = ARD_LST_test.filterDate(cur_date);
+//         // reduce resolution of the ImageCollection 
+//         cur_ImgCol = cur_ImgCol.map(function (inImg) {
+//           // reproject in very low resolution (1920m) in order to reduce the calulation burdun.
+//           return inImg.reproject('EPSG:3857', null, 500000);
+//         });
+//         // mosaic ImageCollection and clip to the target boundary
+//         var cur_ImgMosaic = ee.Image(cur_ImgCol.mosaic()).clipToCollection(State_Bnds_CO);
+//         // get the number of bands in the Image
+//         var num_bands = cur_ImgMosaic.bandNames().size();
+      
+      
+//         var cur_ImgCol2 = Landsat_Surface_Reflectance
+//           .filterBounds(State_Bnds_CO)
+//           .filterDate(cur_date, cur_date.advance(1, 'day'));
+//         cur_ImgCol2 = cur_ImgCol2.map(function (inImg) {
+//           // reproject in very low resolution (1920m) in order to reduce the calulation burdun.
+//           return inImg.reproject('EPSG:3857', null, 500000);
+//         });
+//         var cur_ImgMosaic2 = ee.Image(cur_ImgCol2.mosaic()).clipToCollection(State_Bnds_CO);
+//         var num_bands2 = cur_ImgMosaic2.bandNames().size();
+      
+//         // If number of bands > 0, return a normal date string, otherwise get an empty sting
+//         var cur_date_str = ee.Algorithms.If(num_bands.gt(0).and(num_bands2.gt(0)), cur_date.format('YYYY-MM-dd'), '');
+      
+//         // var Mask_ImgMosaic = cur_ImgMosaic.mask().select(0).clipToCollection(State_Bnds_CO);
+      
+//         // var cur_countMaskVal = ee.Algorithms.If(num_bands.gt(0), 
+//         //   //cur_ImgMosaic.mask().clipToCollection(State_Bnds_CO).select(0).updateMask(cur_ImgMosaic.mask().select(0)).rename('count').reduceRegion({
+//         //   Mask_ImgMosaic.rename('count')
+//         //   .reduceRegion({
+//         //     reducer: ee.Reducer.count(),
+//         //     geometry: State_Bnds_CO_geo, //State_Bnds_CO.first().geometry(),
+//         //     scale: 500000,
+//         //     maxPixels: 1e13
+//         //   }).get('count'), 
+//         //   0);
+      
+//         // create a empty Feature with two properties: date_str and date_str_len
+//         var ret_date_Ft = ee.Feature(null, {
+//           'date_str': cur_date_str,
+//           'date_str_len': ee.String(cur_date_str).length()//, 
+//           // 'count': cur_countMaskVal
+//         });
+//         return ret_date_Ft;
+//       });
+      
+//       var valid_dates_filtered = date_Fts
+//         .filter(ee.Filter.gt('date_str_len', 0));
+//       //print("valid_dates_Fts", valid_dates_filtered);
+      
+//       var valid_dates_filtered_StringList = valid_dates_filtered.map(
+//         function (inFt) {
+//           inFt = ee.Feature(inFt);
+//           return inFt.get('date_str');
+//         });
+        
+//       var c_m_sd_dict_list = valid_dates_filtered_StringList.map(calculate_daily_c_mean_std);
+      
+//       var exportFC = ee.FeatureCollection(c_m_sd_dict_list.map(
+//         function (inDict) {
+//           inDict = ee.Dictionary(inDict);
+//           var NewFt = ee.Feature(null, {
+//             'date': inDict.get("date"),
+//             'mean': inDict.get("mean"),
+//             'std': inDict.get("std")
+//           });
+//           return NewFt;
+//         }));    
+      
+//       return exportFC;
+//     })
+//   ).flatten();
+
+// print("FC_of_metrics", FC_of_metrics);
+
+
+
+
+
+// // for (var i = 0; i < 60; i++) {
+// //   var cur_date = ee.Date(c_m_sd_dict_list[i].get("date")).format('YYYY-MM');
+// //   var cur_mean = c_m_sd_dict_list[i].get("mean");
+// //   var cur_std = c_m_sd_dict_list[i].get("std");
+
+// //   // var raw_date = ee.Date(c_m_sd_dict_list[i].get("date"));
+// //   // var cur_year = raw_date.get('year');
+// //   // var cur_month = raw_date.get('month');
+// //   // var cur_date = cur_year + "-" + cur_month;
+
+// //   if (m_c_m_sd_dict_list.length() === 0 || m_c_m_sd_dict_list.get(-1).get("date") != cur_date) {
+// //     m_c_m_sd_dict_list.add(ee.Dictionary({
+// //       'date': inDict.get("date"),
+// //       'mean': ee.List([cur_mean]),
+// //       'std': ee.List([cur_std])
+// //     }));
+// //   }
+// //   else {
+// //     m_c_m_sd_dict_list.get(-1).get("mean").add(cur_mean);
+// //     m_c_m_sd_dict_list.get(-1).get("std").add(cur_std);
+// //   }
+// // }
+
+// // for (var i = 0; i < m_c_m_sd_dict_list.length(); i++) {
+// //   cur_mean_list = m_c_m_sd_dict_list[i].get("mean");
+// //   cur_std_list = m_c_m_sd_dict_list[i].get("std");
+
+
+// //   // weighted mean (c)
+// //   var mean_sum = cur_mean_list.reduce(ee.Reducer.sum());
+// //   var count_sum = cur_mean_list.length();
+
+
+// //   var c_wMean = ee.Number(mean_sum).divide(ee.Number(count_sum));
+// //   // set value
+// //   m_c_m_sd_dict_list[i].set("mean", c_wMean);
+
+// //   // std of std
+
+// //   var cTvar_sum = cur_std_list.reduce(ee.Reducer.sum());
+// //   var countvar_sum = cur_std_list.length();
+// //   var cvar_Mean = ee.Number(cTvar_sum).divide(ee.Number(countvar_sum));
+
+// //   var secondterm_var = ee.Number(
+// //     cur_std_list
+// //       .map(function (mu_j) { return ee.Number(mu_j).subtract(cvar_Mean).pow(2); })
+// //       .zip(count_List)
+// //       .map(function (tmp_list_j) {
+// //         tmp_list_j = ee.List(tmp_list_j);
+// //         return ee.Number(tmp_list_j.get(0)).multiply(tmp_list_j.get(1));
+// //       })
+// //       .reduce(ee.Reducer.sum())
+// //   )
+// //     .divide(ee.Number(count_sum).subtract(1))
+// //     ;
+
+// //   // weighted std (c)
+// //   var c_sd = ee.Number(cTvar_sum).divide((ee.Number(countvar_sum)).subtract(1)).add(secondterm_var).sqrt();
+
+// //   // set value
+// //   m_c_m_sd_dict_list[i].set("std", c_sd);
+// // }
+
+
+
+
+// var cur_ImgCol2 = Landsat_Surface_Reflectance
+//   .filterBounds(State_Bnds_CO)
+//   .filterDate(ee.Date('2018-08-05'), ee.Date('2018-08-06')).map(maskl8SR);
+// Map.addLayer(cur_ImgCol2, {}, 'LS_refl_2018-08-02');
+// cur_ImgCol2 = cur_ImgCol2.map(function (inImg) {
+//   // reproject in very low resolution (1920m) in order to reduce the calulation burdun.
+//   return inImg.reproject('EPSG:3857', null, 500000);
+// });
+// var cur_ImgMosaic2 = ee.Image(cur_ImgCol2.mosaic()).clipToCollection(State_Bnds_CO);
+// var num_bands2 = cur_ImgMosaic2.bandNames();
+// print("num_bands2", num_bands2);
+// print("cur_ImgMosaic2", cur_ImgMosaic2);
+
+// //list of dictionary to feature collection format in order to export later
+// var exportFC = ee.FeatureCollection(c_m_sd_dict_list.map(
+//   function (inDict) {
+//     inDict = ee.Dictionary(inDict);
+//     var NewFt = ee.Feature(null, {
+//       'date_str': inDict.get("date"),
+//       'mean': inDict.get("mean"),
+//       'std': inDict.get("std")
+//     });
+//     return NewFt;
+//   }));
+
+// print("exportFC", exportFC);
+
+// //print("start_date_str+\"_MeanStd\"", start_date_str+"_MeanStd")
+// //Export to Excel
+// var ExportToCSV = Export.table.toDrive(
+//   exportFC,
+//   start_date_str + "_MeanStd",
+//   "new",
+//   start_date_str + "_" + end_date_str,
+//   "CSV"
+// );
+//
